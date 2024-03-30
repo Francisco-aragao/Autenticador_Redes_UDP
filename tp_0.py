@@ -1,13 +1,8 @@
-
 import argparse
 import struct
 import socket 
 
-
-LEN_RESPONSE_ERROR = 4
-
-# each 'h' means 2 bytes
-# each 'i' means 4 bytes
+# network format in https://docs.python.org/3/library/struct.html#byte-order-size-and-alignment
 ID_NETWORK_MODE_FORMAT = '>12s'
 TYPE_NETWORK_MODE_FORMAT = '>h'
 N_NETWORK_MODE_FORMAT = '>h'
@@ -16,33 +11,29 @@ TOKEN_FORMAT = '64s'
 GROUP_TOKEN_FORMAT = '64s'
 SAS_FORMAT = '12si64s'
 STATUS_FORMAT = 'b'
-
-TYPE_INDIVIDUAL_TOKEN_REQUEST = 1
-
-TYPE_INDIVIDUAL_TOKEN_RESPONSE = 2
-LEN_INDIVIDUAL_TOKEN_RESPONSE = 82
+ERROR_RESPONSE_FORMAT = '>hh'
 INDIVIDUAL_TOKEN_RESPONSE_FORMAT = '>h12si64s'
-
-TYPE_INDIVIDUAL_TOKEN_VALIDATION = 3
-LEN_INDIVIDUAL_TOKEN_VALIDATION = 83
 INDIVIDUAL_TOKEN_VALIDATION_RESPONSE_FORMAT = '>h12si64sb'
+INDIVIDUAL_GROUP_TOKEN_RESPONSE_FORMAT = '>h12si64sb'
 
+# requests types
+TYPE_INDIVIDUAL_TOKEN_REQUEST = 1
+TYPE_INDIVIDUAL_TOKEN_RESPONSE = 2
+TYPE_INDIVIDUAL_TOKEN_VALIDATION = 3
 TYPE_INDIVIDUAL_TOKEN_STATUS = 4
-
 TYPE_GROUP_TOKEN_REQUEST = 5
+TYPE_GROUP_TOKEN_RESPONSE = 6
+TYPE_GROUP_TOKEN_VALIDATION = 7
+TYPE_GROUP_TOKEN_STATUS = 8
+
+# len in bytes of requests/responses 
+LEN_INDIVIDUAL_TOKEN_RESPONSE = 82
+LEN_INDIVIDUAL_TOKEN_VALIDATION = 83
+LEN_RESPONSE_ERROR = 4
 LEN_BYTES_TYPE = 2
 LEN_BYTES_TOKEN = LEN_BYTES_GROUP_TOKEN = 64
 LEN_BYTES_SAS = 80
-INDIVIDUAL_GROUP_TOKEN_RESPONSE_FORMAT = '>h12si64sb'
-
-TYPE_GROUP_TOKEN_RESPONSE = 6
-
-TYPE_GROUP_TOKEN_VALIDATION = 7
-
-TYPE_GROUP_TOKEN_STATUS = 8
-
 LEN_BYTES_STATUS = 1
-
 LEN_BYTES_N = 2
 
 def return_input_parameters():
@@ -53,8 +44,7 @@ def return_input_parameters():
 
     parser.add_argument('command', choices=['itr', 'itv', 'gtr', 'gtv'], help='The command option to run the code')
 
-    # Parse the arguments to get the command
-    args, unknown = parser.parse_known_args()
+    args, _ = parser.parse_known_args()
 
     # Handle the command
     if args.command == 'itr':
@@ -66,33 +56,20 @@ def return_input_parameters():
         parser.add_argument('N', type=int, help='Number of SAS arguments for gtr command')
         parser.add_argument('SAS', nargs='+', help='List of SAS arguments for gtr command')
     elif args.command == 'gtv':
-        parser.add_argument('N', type=int, help='Number of SAS arguments for gtv command')
         parser.add_argument('GAS', type=str, help='List of GAS arguments for gtv command')
     else:
         parser.error('')
 
-
-    # Parse the arguments again to get all arguments
     args = parser.parse_args()
 
-    # Handle the arguments
+    # Verify number of SAS received
     if args.command == 'gtr':
         if len(args.SAS) != args.N:
             parser.error(f'Must be received {args.N} values of SAS, received {len(args.SAS)}')
-    if args.command == 'gtv':
-        count = 0
-        for char in args.GAS:
-            if char == '+':
-                count += 1
-        if count != args.N:
-            parser.error(f'Must be received {args.N} values of SAS in GAS, received {count}')
-
 
     return args
 
-# student id have to be 12 bytes, so the last 2 bytes are empty spaces
-STUDENT_ID = '2021031726  '
-
+# passing parameters to network mode format
 def type_in_network_mode (type: int):
     type_net_mode = struct.pack(TYPE_NETWORK_MODE_FORMAT, type)
     
@@ -135,6 +112,7 @@ def group_token_in_network_mode (group_token: str):
     return group_token_net_mode
     
 
+# aux function to convert student_id to 12 bytes format
 def adjust_student_id_to_12_bytes(student_id: str):
 
     student_id_adjusted = ''
@@ -146,8 +124,16 @@ def adjust_student_id_to_12_bytes(student_id: str):
 
     return student_id_adjusted
 
+def check_type_response(response, correct_response_type):
+    
+    type_position_in_response = 0
+    type = response[type_position_in_response]
+    
+    if type != correct_response_type:
+        server.close()
+        raise Exception('Invalid type of response')
 
-
+# requests and socket functions
 def start_server(server_address: str, server_port: int):
 
     # function return list, the last tuple returned has lenght = 4 if IPv6 and lenght = 2 if IPv4
@@ -161,7 +147,7 @@ def start_server(server_address: str, server_port: int):
         server_ip = ip_info[0][-1][0]
         server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    server.settimeout(20)
+    server.settimeout(10)
 
     loop_until_receive_response = 1
     number_of_attempts = 4
@@ -181,13 +167,7 @@ def start_server(server_address: str, server_port: int):
 
     return server
 
-
-
-def individual_token_request(server:socket, student_id: str, nonce: int):
-
-
-    message = type_in_network_mode(TYPE_INDIVIDUAL_TOKEN_REQUEST) + id_in_network_mode(bytes(student_id, encoding="ascii")) + nonce_in_network_mode(nonce)
-
+def make_request_receive_response(server, message, len_response):
     loop_until_receive_response = 1
     number_of_attempts = 4
 
@@ -200,7 +180,7 @@ def individual_token_request(server:socket, student_id: str, nonce: int):
         try:
             server.send(message)
             
-            response = server.recv(LEN_INDIVIDUAL_TOKEN_RESPONSE)
+            response = server.recv(len_response)
             
             loop_until_receive_response = 0
 
@@ -208,21 +188,27 @@ def individual_token_request(server:socket, student_id: str, nonce: int):
             number_of_attempts -= 1
 
     if len(response) == LEN_RESPONSE_ERROR:
+        response_error = struct.unpack(ERROR_RESPONSE_FORMAT, response)
         server.close()
-        raise Exception (f'Error: {response}')
+        raise Exception (f'Error: {response_error}')
     
-    if (len(response) != LEN_INDIVIDUAL_TOKEN_RESPONSE):
+    if (len(response) != len_response):
         server.close()
         raise Exception('Invalid response')
     
+    return response
+
+
+def individual_token_request(server:socket, student_id: str, nonce: int):
+
+    message = type_in_network_mode(TYPE_INDIVIDUAL_TOKEN_REQUEST) + id_in_network_mode(student_id) + nonce_in_network_mode(nonce)
+
+    response = make_request_receive_response(server, message, LEN_INDIVIDUAL_TOKEN_RESPONSE)
+
     response_unpacked = struct.unpack(INDIVIDUAL_TOKEN_RESPONSE_FORMAT, response)
 
-    type_position_in_response = 0
-    type = response_unpacked[type_position_in_response]
-    
-    if type != TYPE_INDIVIDUAL_TOKEN_RESPONSE:
-        server.close()
-        raise Exception('Invalid type of response')
+    # check type of response
+    check_type_response(response_unpacked, TYPE_INDIVIDUAL_TOKEN_RESPONSE)
 
     token_position_in_response = -1
     token = response_unpacked[token_position_in_response].decode('ascii')
@@ -244,41 +230,12 @@ def individual_token_validation(server: socket, SAS: str):
 
     message = type_in_network_mode(TYPE_INDIVIDUAL_TOKEN_VALIDATION) + id_in_network_mode(student_id) + nonce_in_network_mode(nonce) + token_in_network_mode(token)
 
-    loop_until_receive_response = 1
-    number_of_attempts = 4
-
-    # loop to handle timeout in conection
-    while(loop_until_receive_response):
-        if (number_of_attempts == 0):
-            server.close()
-            raise Exception('Too many attempts, conection closed')
-
-        try:
-            server.send(message)
-            
-            response = server.recv(LEN_INDIVIDUAL_TOKEN_VALIDATION)
-            
-            loop_until_receive_response = 0
-
-        except socket.timeout:
-            number_of_attempts -= 1
-    
-    if len(response) == LEN_RESPONSE_ERROR:
-        server.close()
-        raise Exception (f'Error: {response}')
-    
-    if (len(response) != LEN_INDIVIDUAL_TOKEN_VALIDATION):
-        server.close()
-        raise Exception('Invalid response')
+    response = make_request_receive_response(server, message, LEN_INDIVIDUAL_TOKEN_VALIDATION)
     
     response_unpacked = struct.unpack(INDIVIDUAL_TOKEN_VALIDATION_RESPONSE_FORMAT, response)
 
-    type_position_in_response = 0
-    type = response_unpacked[type_position_in_response]
-    
-    if type != TYPE_INDIVIDUAL_TOKEN_STATUS:
-        server.close()
-        raise Exception('Invalid type of response')
+    # check type of response
+    check_type_response(response_unpacked, TYPE_INDIVIDUAL_TOKEN_STATUS)
 
     status_position_in_response = -1
     status = response_unpacked[status_position_in_response]
@@ -300,35 +257,11 @@ def group_token_request(server: socket, n: int, SAS: list[str]):
 
         message += id_in_network_mode(student_id) + nonce_in_network_mode(nonce) + token_in_network_mode(token)
 
-    loop_until_receive_response = 1
-    number_of_attempts = 4
+    total_len_response = LEN_BYTES_TYPE + LEN_BYTES_N + (LEN_BYTES_SAS * n) + LEN_BYTES_GROUP_TOKEN
 
-    # loop to handle timeout in conection
-    while(loop_until_receive_response):
-        if (number_of_attempts == 0):
-            server.close()
-            raise Exception('Too many attempts, conection closed')
-
-        try:
-            server.send(message)
-            
-            total_len_response = LEN_BYTES_TYPE + LEN_BYTES_N + (LEN_BYTES_SAS * n) + LEN_BYTES_GROUP_TOKEN
-            response = server.recv(total_len_response)
-            
-            loop_until_receive_response = 0
-
-        except socket.timeout:
-            number_of_attempts -= 1
+    response = make_request_receive_response(server, message, total_len_response)
     
-    if len(response) == LEN_RESPONSE_ERROR:
-        server.close()
-        raise Exception (f'Error: {response}')
-    
-    if (len(response) != total_len_response):
-        server.close()
-        raise Exception('Invalid response')
-    
-    # format to type + n
+    # netowrk mode format specification to: type + n + (SAS * n) + token + status
     group_token_response_format_message = '>hh'
     for _ in range(len(SAS)):
         group_token_response_format_message += SAS_FORMAT
@@ -337,12 +270,8 @@ def group_token_request(server: socket, n: int, SAS: list[str]):
 
     response_unpacked = struct.unpack(group_token_response_format_message, response)
 
-    type_position_in_response = 0
-    type = response_unpacked[type_position_in_response]
-    
-    if type != TYPE_GROUP_TOKEN_RESPONSE:
-        server.close()
-        raise Exception('Invalid type of response')
+    # check type of response
+    check_type_response(response_unpacked, TYPE_GROUP_TOKEN_RESPONSE)
 
     token_position_in_response = -1
     token = response_unpacked[token_position_in_response].decode('ascii')
@@ -357,12 +286,14 @@ def group_token_request(server: socket, n: int, SAS: list[str]):
 
     return response_formated  
 
-def group_token_validation(server: socket, n: int, GAS: str):
+def group_token_validation(server: socket, GAS: str):
     
-    message = type_in_network_mode(TYPE_GROUP_TOKEN_VALIDATION) + n_in_network_mode(n)
-
     # gas format = sas+sas+ ... +sas+group_token 
     GAS_splited = GAS.split('+')
+
+    n = len(GAS_splited) - 1
+
+    message = type_in_network_mode(TYPE_GROUP_TOKEN_VALIDATION) + n_in_network_mode(n)
 
     group_token = GAS_splited[-1]
 
@@ -378,37 +309,10 @@ def group_token_validation(server: socket, n: int, GAS: str):
 
     message += group_token_in_network_mode(group_token)
 
-    loop_until_receive_response = 1
-    number_of_attempts = 4
+    total_len_response = LEN_BYTES_TYPE + LEN_BYTES_N + (LEN_BYTES_SAS * n) + LEN_BYTES_GROUP_TOKEN + LEN_BYTES_STATUS
+    response = make_request_receive_response(server, message, total_len_response)
 
-    # loop to handle timeout in conection
-    while(loop_until_receive_response):
-        if (number_of_attempts == 0):
-            server.close()
-            raise Exception('Too many attempts, conection closed')
-
-        try:
-            server.send(message)
-            
-            total_len_response = LEN_BYTES_TYPE + LEN_BYTES_N + (LEN_BYTES_SAS * n) + LEN_BYTES_GROUP_TOKEN + LEN_BYTES_STATUS
-            response = server.recv(total_len_response)
-            
-            loop_until_receive_response = 0
-
-        except socket.timeout:
-            number_of_attempts -= 1
-    
-    if len(response) == LEN_RESPONSE_ERROR:
-        server.close()
-        raise Exception (f'Error: {response}')
-    
-    if (len(response) != total_len_response):
-        print(len(response))
-        print((response))
-        server.close()
-        raise Exception('Invalid response')    
-
-    # format to type + n
+    # netowrk mode format specification to: type + n + (SAS * n) + token + status
     group_token_response_format_message = '>hh'
 
     for _ in range(len(GAS_splited) - 1):
@@ -416,15 +320,10 @@ def group_token_validation(server: socket, n: int, GAS: str):
     
     group_token_response_format_message += GROUP_TOKEN_FORMAT
 
-    print(group_token_response_format_message + STATUS_FORMAT)
     response_unpacked = struct.unpack(group_token_response_format_message + STATUS_FORMAT, response)
 
-    type_position_in_response = 0
-    type = response_unpacked[type_position_in_response]
-    
-    if type != TYPE_GROUP_TOKEN_STATUS:
-        server.close()
-        raise Exception('Invalid type of response')
+    # check type of response
+    check_type_response(response_unpacked, TYPE_GROUP_TOKEN_STATUS)
 
     status_position_in_response = -1
     status = response_unpacked[status_position_in_response]
@@ -446,12 +345,6 @@ if __name__ == "__main__":
     if (args.command == 'gtr'):
         response = group_token_request(server, args.N, args.SAS)
     if (args.command == 'gtv'):
-        response = group_token_validation(server, args.N, args.GAS)
+        response = group_token_validation(server, args.GAS)
     
     print(response)
-
-
-# mesage format
-# 2 bytes type
-# 12 bytes ID
-# 4 bytes nonce
